@@ -1,5 +1,4 @@
-﻿
-using System;
+﻿using System;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -14,6 +13,7 @@ namespace ProfileApp
 
         public LoginForm()
         {
+            // Defer seeding until after UI controls are initialized.
             Text = "Login";
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(600, 380);
@@ -46,7 +46,7 @@ namespace ProfileApp
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 6,
-                Padding = new Padding(24),
+                Padding = new Padding(34),
             };
             formLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 30)); // Spacer
             formLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));     // Title
@@ -81,6 +81,9 @@ namespace ProfileApp
             Controls.Add(formLayout);
 
             AcceptButton = btnLogin; // Enter key submits
+
+            // Optional: seed defaults for an empty username when the form is created.
+            // Typically seeding is done after a user provides a username (on login), so we skip it here.
         }
 
         private void BtnLogin_Click(object? sender, EventArgs e)

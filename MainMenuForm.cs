@@ -1,6 +1,7 @@
 ﻿
 using System;
 using System.Drawing;
+
 using System.Windows.Forms;
 
 namespace ProfileApp
@@ -11,6 +12,19 @@ namespace ProfileApp
         private readonly string _username;
         private TableLayoutPanel boxesLayout;
 
+        private Image LoadImageFromAssets(string fileName)
+        {
+            // Base directory points to the running EXE folder (bin\Debug\... during dev)
+            string baseDir = AppDomain.CurrentDomain.BaseDirectory;
+            string imgPath = Path.Combine(baseDir, "ImageProperties", fileName);
+
+            if (!File.Exists(imgPath)) return null; // or return a fallback image
+                                                    // Use a stream to avoid file locks, and to dispose properly
+            using (var fs = new FileStream(imgPath, FileMode.Open, FileAccess.Read))
+            {
+                return Image.FromStream(fs);
+            }
+        }
         public MainMenuForm(LoginForm loginForm, string username)
         {
             Theme.Apply(this);
@@ -38,11 +52,17 @@ namespace ProfileApp
                 boxesLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
 
-            string[] keys = { "Box1", "Box2", "Box3", "Box4" };
+            string[] keys = { "Profile 1", "Profile 2", "Profile 3", "Profile 4" };
+
+            string[] fileNames = { "lance.jpeg", "ludovice.jpeg", "espayos.jfif","rei.jfif"};
+
+
             for (int i = 0; i < keys.Length; i++)
             {
-                var box = CreateMenuBox(keys[i], $"Box {i + 1}");
+                var img = LoadImageFromAssets(fileNames[i]);
+                var box = CreateMenuBox(keys[i], $"Profile {i + 1}", img);
                 boxesLayout.Controls.Add(box, i, 0);
+
             }
 
 
@@ -85,25 +105,39 @@ namespace ProfileApp
         }
 
 
-        private Button CreateMenuBox(string profileKey, string text)
+
+
+        private Button CreateMenuBox(string profileKey, string text, Image img)
         {
             var btn = new Button
             {
                 Text = text,
                 Size = new Size(160, 160),
-                Margin = new Padding(12)
+                Margin = new Padding(12),
+                TextImageRelation = TextImageRelation.ImageAboveText,
+                ImageAlign = ContentAlignment.TopCenter,
+                TextAlign = ContentAlignment.BottomCenter,
+                Image = img
+
             };
-            Theme.StyleCard(btn);
+
+            btn.AutoSize = false;           // you already use fixed Size = 160x160
+            btn.Padding = new Padding(8);
+
+            //  Theme.StyleCard(btn);
 
             btn.Click += (_, __) =>
             {
-                var about = new AboutMeForm(this, _username, profileKey); // <-- pass profileKey
+                var about = new AboutMeForm(this, _username, profileKey);
                 about.Show();
                 Hide();
             };
 
             return btn;
         }
+
+
+
 
 
         private void CenterBoxes()

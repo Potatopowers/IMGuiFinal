@@ -1,0 +1,16 @@
+<Solution>
+  <Project Path="bin/Debug/net10.0-windows/IMGuiMenu.exe">
+    <Properties Name="DebuggerProjectSystem">
+      <Property Name="AttachLaunchAction" Value="No" />
+      <Property Name="Environment" Value="Default" />
+      <Property Name="Executable" Value="C:\Users\elore\source\repos\IMGuiFinal\bin\Debug\net10.0-windows\IMGuiMenu.exe" />
+      <Property Name="IORedirection" Value="Auto" />
+      <Property Name="LaunchingEngine" Value="00000000-0000-0000-0000-000000000000" />
+      <Property Name="LaunchSQLEngine" Value="No" />
+      <Property Name="PortSupplier" Value="00000000-0000-0000-0000-000000000000" />
+      <Property Name="RemoteMachine" Value="LAPTOP-7H1AGNBV" />
+      <Property Name="StartingDirectory" Value="C:\Users\elore\source\repos\IMGuiFinal\bin\Debug\net10.0-windows" />
+      <Property Name="UseLegacyDebugEngines" Value="No" />
+    </Properties>
+  </Project>
+</Solution>

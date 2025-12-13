@@ -1,240 +1,145 @@
-﻿using System;
+﻿using Microsoft.Data.SqlClient;
+using System;
 using System.Collections.Generic;
-using System.IO;
-using Microsoft.Data.Sqlite;
+using System.Data;
 
 namespace ProfileApp
 {
-    public class AppDb : IDisposable
+    /// <summary>
+    /// SQL Server LocalDB-backed data access for Profiles and Sections.
+    /// Switches the app from SQLite to Microsoft SQL Server.
+    /// </summary>
+    public sealed class AppDb : IDisposable
     {
-        private readonly string _dbPath;
-        private readonly SqliteConnection _conn;
+        private readonly SqlConnection _conn;
 
+        /// <summary>
+        /// Opens a LocalDB connection and ensures the schema exists.
+        /// </summary>
         public AppDb()
         {
+            // LocalDB connection string:
+            // - (localdb)\MSSQLLocalDB : default LocalDB instance
+            // - Initial Catalog         : your database name
+            // - Integrated Security     : Windows auth (no user/password)
+            // - MARS                    : multiple active readers
+            const string instance = @"(localdb)\MSSQLLocalDB";
+            const string dbName = "ProfileAppDb";
 
-            _dbPath = Path.Combine(AppContext.BaseDirectory, "AppData.db");
-            _conn = new SqliteConnection($"Data Source={_dbPath}");
+            // Ensure the database exists by connecting to the master database first.
+            // If the DB is missing, create it. This avoids trying to open a connection
+            // directly to a non-existent database (which causes "Cannot open database" errors).
+            var masterCs = $@"Data Source={instance};Initial Catalog=master;Integrated Security=True;";
+            using (var master = new SqlConnection(masterCs))
+            {
+                master.Open();
+                using var cmd = master.CreateCommand();
+                cmd.CommandText = $@"
+                    IF DB_ID(N'{dbName}') IS NULL
+                    BEGIN
+                        CREATE DATABASE [{dbName}];
+                    END;";
+                cmd.ExecuteNonQuery();
+            }
+
+            // Now open a connection directly to the target DB
+            var cs = $@"Data Source={instance};
+                       Initial Catalog={dbName};
+                       Integrated Security=True;
+                       MultipleActiveResultSets=True";
+
+            _conn = new SqlConnection(cs);
             _conn.Open();
 
-            // Run migration first (safe no-op if already migrated)
-            MigrateIfNeeded();
-
-            // Ensure tables exist (for fresh DB)
-            EnsureCreated();
-
-        }
-
-        private void MigrateIfNeeded()
-        {
-            // Detect if Profiles has ProfileKey column
-            bool profilesHasProfileKey = false;
-            using (var cmd = _conn.CreateCommand())
-            {
-                cmd.CommandText = "PRAGMA table_info(Profiles);";
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    var colName = reader.GetString(1);
-                    if (string.Equals(colName, "ProfileKey", StringComparison.OrdinalIgnoreCase))
-                    {
-                        profilesHasProfileKey = true;
-                        break;
-                    }
-                }
-            }
-
-            // Detect if Sections has ProfileKey column
-            bool sectionsHasProfileKey = false;
-            using (var cmd = _conn.CreateCommand())
-            {
-                cmd.CommandText = "PRAGMA table_info(Sections);";
-                using var reader = cmd.ExecuteReader();
-                while (reader.Read())
-                {
-                    var colName = reader.GetString(1);
-                    if (string.Equals(colName, "ProfileKey", StringComparison.OrdinalIgnoreCase))
-                    {
-                        sectionsHasProfileKey = true;
-                        break;
-                    }
-                }
-            }
-
-            // If both already have ProfileKey, nothing to do
-            if (profilesHasProfileKey && sectionsHasProfileKey)
-                return;
-
-            // Begin migration transaction
-            using var tx = _conn.BeginTransaction();
-
-            // ------------- Migrate Profiles -------------
-            if (!profilesHasProfileKey)
-            {
-                // Create new table with correct schema
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.Transaction = tx;
-                    cmd.CommandText = @"
-                CREATE TABLE IF NOT EXISTS Profiles_new (
-                    Username    TEXT NOT NULL,
-                    ProfileKey  TEXT NOT NULL,
-                    DisplayName TEXT,
-                    Brief       TEXT,
-                    PhotoPath   TEXT,
-                    PRIMARY KEY(Username, ProfileKey)
-                );";
-                    cmd.ExecuteNonQuery();
-                }
-
-                // Copy old rows into Profiles_new with a default ProfileKey ('Box1')
-                // If your old DB had only one profile per user, we assume it's Box1.
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.Transaction = tx;
-                    // Try to read old columns: Username, Brief, PhotoPath (old schema)
-                    // DisplayName fallback to empty string
-                    cmd.CommandText = @"
-                INSERT INTO Profiles_new(Username, ProfileKey, DisplayName, Brief, PhotoPath)
-                SELECT 
-                    Username,
-                    'Box1' AS ProfileKey,
-                    '' AS DisplayName,
-                    Brief,
-                    PhotoPath
-                FROM Profiles;";
-                    cmd.ExecuteNonQuery();
-                }
-
-                // Drop old table and rename new
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.Transaction = tx;
-                    cmd.CommandText = @"DROP TABLE Profiles;";
-                    cmd.ExecuteNonQuery();
-
-                    cmd.CommandText = @"ALTER TABLE Profiles_new RENAME TO Profiles;";
-                    cmd.ExecuteNonQuery();
-                }
-            }
-
-            // ------------- Migrate Sections -------------
-            if (!sectionsHasProfileKey)
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.Transaction = tx;
-                    cmd.CommandText = @"
-                CREATE TABLE IF NOT EXISTS Sections_new (
-                    Username   TEXT NOT NULL,
-                    ProfileKey TEXT NOT NULL,
-                    Section    TEXT NOT NULL,
-                    Body       TEXT,
-                    UpdatedAt  TEXT,
-                    PRIMARY KEY(Username, ProfileKey, Section)
-                );";
-                    cmd.ExecuteNonQuery();
-                }
-
-                // Copy old rows into Sections_new with default ProfileKey ('Box1')
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.Transaction = tx;
-                    cmd.CommandText = @"
-                INSERT INTO Sections_new(Username, ProfileKey, Section, Body, UpdatedAt)
-                SELECT
-                    Username,
-                    'Box1' AS ProfileKey,
-                    Section,
-                    Body,
-                    UpdatedAt
-                FROM Sections;";
-                    cmd.ExecuteNonQuery();
-                }
-
-                // Drop old table and rename
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.Transaction = tx;
-                    cmd.CommandText = @"DROP TABLE Sections;";
-                    cmd.ExecuteNonQuery();
-
-                    cmd.CommandText = @"ALTER TABLE Sections_new RENAME TO Sections;";
-                    cmd.ExecuteNonQuery();
-                }
-            }
-
-            tx.Commit();
-        }
-
-        private void EnsureCreated()
-        {
-            using var cmd = _conn.CreateCommand();
-            cmd.CommandText = @"
-                -- Profiles: one account can own multiple profiles
-                CREATE TABLE IF NOT EXISTS Profiles (
-                    Username   TEXT NOT NULL,
-                    ProfileKey TEXT NOT NULL,          -- 'Box1','Box2','Box3','Box4' (or any ID)
-                    DisplayName TEXT,                  -- optional: name shown on About Me
-                    Brief      TEXT,
-                    PhotoPath  TEXT,
-                    PRIMARY KEY(Username, ProfileKey)
-                );
-
-                -- Sections per profile
-                CREATE TABLE IF NOT EXISTS Sections (
-                    Username   TEXT NOT NULL,
-                    ProfileKey TEXT NOT NULL,
-                    Section    TEXT NOT NULL,          -- 'Education','Hobbies','Skills','Message'
-                    Body       TEXT,
-                    UpdatedAt  TEXT,
-                    PRIMARY KEY(Username, ProfileKey, Section)
-                );";
-            cmd.ExecuteNonQuery();
+            // Make sure our DB/tables exist (idempotent)
+            EnsureCreatedSqlServer();
         }
 
         /// <summary>
-        /// Create 4 distinct profiles for the user with unique defaults.
-        /// Safe to call on each login (INSERT OR IGNORE).
+        /// Creates the database objects (tables) if missing.
+        /// This is safe to call at startup—does nothing if already created.
+        /// </summary>
+        private void EnsureCreatedSqlServer()
+        {
+            // NOTE: In ADO.NET, "USE ProfileAppDb" changes the context for this connection.
+            // We set Initial Catalog=ProfileAppDb in the connection string, so we're already in the DB.
+            // We still guard table existence with OBJECT_ID checks.
+            using var cmd = _conn.CreateCommand();
+            cmd.CommandText = @"
+                IF OBJECT_ID(N'dbo.Profiles', N'U') IS NULL
+                BEGIN
+                    CREATE TABLE dbo.Profiles (
+                        Username     nvarchar(100) NOT NULL,
+                        ProfileKey   nvarchar(50)  NOT NULL,  -- 'Box1','Box2','Box3','Box4' (or any profile id)
+                        DisplayName  nvarchar(200) NULL,
+                        Brief        nvarchar(max) NULL,
+                        PhotoPath    nvarchar(400) NULL,
+                        CONSTRAINT PK_Profiles PRIMARY KEY CLUSTERED (Username, ProfileKey)
+                    );
+                END;
+
+                IF OBJECT_ID(N'dbo.Sections', N'U') IS NULL
+                BEGIN
+                    CREATE TABLE dbo.Sections (
+                        Username     nvarchar(100) NOT NULL,
+                        ProfileKey   nvarchar(50)  NOT NULL,
+                        Section      nvarchar(50)  NOT NULL,  -- 'Education','Hobbies','Skills','Message'
+                        Body         nvarchar(max) NULL,
+                        UpdatedAt    datetime2(3)  NULL,
+                        CONSTRAINT PK_Sections PRIMARY KEY CLUSTERED (Username, ProfileKey, Section)
+                    );
+                END;";
+            cmd.ExecuteNonQuery();
+        }
+
+        // --------------------------------------------------------------------
+        // Seeding (four distinct profiles per user, with unique defaults)
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Seeds Box1–Box4 profiles for the given username, with unique defaults.
+        /// Safe to call on each login—uses INSERT IF NOT EXISTS semantics.
         /// </summary>
         public void SeedDefaultsForUserWithProfiles(string username)
         {
             var profiles = new[]
             {
-                new { Key = "Box1", Name = "Lance R.",     Brief = "Hi! I'm Lance. I enjoy Java and C# projects." },
-                new { Key = "Box2", Name = "Anna C.",      Brief = "Hello, I'm Anna—UI/UX enthusiast and coder." },
-                new { Key = "Box3", Name = "Marc D.",      Brief = "Marc here. I like data and backend APIs." },
-                new { Key = "Box4", Name = "Kyla P.",      Brief = "Kyla—frontend lover, curious about design." },
+                new { Key = "Box1", Name = "Lance R.", Brief = "Hi! I'm Lance. I enjoy Java and C# projects." },
+                new { Key = "Box2", Name = "Anna C.",  Brief = "Hello, I'm Anna—UI/UX enthusiast and coder." },
+                new { Key = "Box3", Name = "Marc D.",  Brief = "Marc here. I like data and backend APIs." },
+                new { Key = "Box4", Name = "Kyla P.",  Brief = "Kyla—frontend lover, curious about design." },
             };
 
             foreach (var p in profiles)
             {
-                // Profiles
+                // Upsert-like: insert only if missing
                 using (var cmd = _conn.CreateCommand())
                 {
-                    cmd.CommandText = @"INSERT OR IGNORE INTO Profiles(Username, ProfileKey, DisplayName, Brief, PhotoPath)
-                                        VALUES ($u, $k, $n, $b, $p);";
-                    cmd.Parameters.AddWithValue("$u", username);
-                    cmd.Parameters.AddWithValue("$k", p.Key);
-                    cmd.Parameters.AddWithValue("$n", p.Name);
-                    cmd.Parameters.AddWithValue("$b", p.Brief);
-                    cmd.Parameters.AddWithValue("$p", ""); // optionally set per-profile image paths
+                    cmd.CommandText = @"
+                        IF NOT EXISTS (SELECT 1 FROM dbo.Profiles WHERE Username=@u AND ProfileKey=@k)
+                            INSERT INTO dbo.Profiles(Username, ProfileKey, DisplayName, Brief, PhotoPath)
+                            VALUES(@u, @k, @n, @b, @p);";
+                    cmd.Parameters.Add(new SqlParameter("@u", SqlDbType.NVarChar, 100) { Value = username });
+                    cmd.Parameters.Add(new SqlParameter("@k", SqlDbType.NVarChar, 50) { Value = p.Key });
+                    cmd.Parameters.Add(new SqlParameter("@n", SqlDbType.NVarChar, 200) { Value = p.Name });
+                    cmd.Parameters.Add(new SqlParameter("@b", SqlDbType.NVarChar, -1) { Value = p.Brief });
+                    cmd.Parameters.Add(new SqlParameter("@p", SqlDbType.NVarChar, 400) { Value = "" });
                     cmd.ExecuteNonQuery();
                 }
 
                 // Sections defaults vary by profile to demonstrate uniqueness
                 var defaults = DefaultSectionsForProfile(p.Key);
-
                 foreach (var kvp in defaults)
                 {
                     using var cmd2 = _conn.CreateCommand();
-                    cmd2.CommandText = @"INSERT OR IGNORE INTO Sections(Username, ProfileKey, Section, Body, UpdatedAt)
-                                         VALUES ($u, $k, $s, $b, $t);";
-                    cmd2.Parameters.AddWithValue("$u", username);
-                    cmd2.Parameters.AddWithValue("$k", p.Key);
-                    cmd2.Parameters.AddWithValue("$s", kvp.Key);
-                    cmd2.Parameters.AddWithValue("$b", kvp.Value);
-                    cmd2.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("o"));
+                    cmd2.CommandText = @"
+                        IF NOT EXISTS (SELECT 1 FROM dbo.Sections WHERE Username=@u AND ProfileKey=@k AND Section=@s)
+                            INSERT INTO dbo.Sections(Username, ProfileKey, Section, Body, UpdatedAt)
+                            VALUES(@u, @k, @s, @b, SYSUTCDATETIME());";
+                    cmd2.Parameters.Add(new SqlParameter("@u", SqlDbType.NVarChar, 100) { Value = username });
+                    cmd2.Parameters.Add(new SqlParameter("@k", SqlDbType.NVarChar, 50) { Value = p.Key });
+                    cmd2.Parameters.Add(new SqlParameter("@s", SqlDbType.NVarChar, 50) { Value = kvp.Key });
+                    cmd2.Parameters.Add(new SqlParameter("@b", SqlDbType.NVarChar, -1) { Value = kvp.Value });
                     cmd2.ExecuteNonQuery();
                 }
             }
@@ -287,65 +192,103 @@ namespace ProfileApp
             }
         }
 
-        // Profile
+        // --------------------------------------------------------------------
+        // Profiles
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Reads a single profile (display name, brief, photo path).
+        /// </summary>
         public (string DisplayName, string Brief, string PhotoPath) GetProfile(string username, string profileKey)
         {
             using var cmd = _conn.CreateCommand();
-            cmd.CommandText = @"SELECT DisplayName, Brief, PhotoPath
-                                FROM Profiles WHERE Username=$u AND ProfileKey=$k;";
-            cmd.Parameters.AddWithValue("$u", username);
-            cmd.Parameters.AddWithValue("$k", profileKey);
-            using var reader = cmd.ExecuteReader();
-            if (reader.Read())
+            cmd.CommandText = @"
+                SELECT DisplayName, Brief, PhotoPath
+                FROM dbo.Profiles
+                WHERE Username=@u AND ProfileKey=@k;";
+            cmd.Parameters.Add(new SqlParameter("@u", SqlDbType.NVarChar, 100) { Value = username });
+            cmd.Parameters.Add(new SqlParameter("@k", SqlDbType.NVarChar, 50) { Value = profileKey });
+
+            using var r = cmd.ExecuteReader();
+            if (r.Read())
+            {
                 return (
-                    reader.IsDBNull(0) ? "" : reader.GetString(0),
-                    reader.IsDBNull(1) ? "" : reader.GetString(1),
-                    reader.IsDBNull(2) ? "" : reader.GetString(2)
+                    r.IsDBNull(0) ? "" : r.GetString(0),
+                    r.IsDBNull(1) ? "" : r.GetString(1),
+                    r.IsDBNull(2) ? "" : r.GetString(2)
                 );
+            }
             return ("", "", "");
         }
 
+        /// <summary>
+        /// Upserts a profile row (insert if missing, else update).
+        /// </summary>
         public void SaveProfile(string username, string profileKey, string displayName, string brief, string photoPath)
         {
             using var cmd = _conn.CreateCommand();
-            cmd.CommandText = @"INSERT INTO Profiles(Username, ProfileKey, DisplayName, Brief, PhotoPath)
-                                VALUES ($u, $k, $n, $b, $p)
-                                ON CONFLICT(Username, ProfileKey) DO UPDATE SET
-                                    DisplayName=$n, Brief=$b, PhotoPath=$p;";
-            cmd.Parameters.AddWithValue("$u", username);
-            cmd.Parameters.AddWithValue("$k", profileKey);
-            cmd.Parameters.AddWithValue("$n", displayName ?? "");
-            cmd.Parameters.AddWithValue("$b", brief ?? "");
-            cmd.Parameters.AddWithValue("$p", photoPath ?? "");
+            cmd.CommandText = @"
+                IF EXISTS (SELECT 1 FROM dbo.Profiles WHERE Username=@u AND ProfileKey=@k)
+                    UPDATE dbo.Profiles
+                    SET DisplayName=@n, Brief=@b, PhotoPath=@p
+                    WHERE Username=@u AND ProfileKey=@k;
+                ELSE
+                    INSERT INTO dbo.Profiles(Username, ProfileKey, DisplayName, Brief, PhotoPath)
+                    VALUES(@u, @k, @n, @b, @p);";
+            cmd.Parameters.Add(new SqlParameter("@u", SqlDbType.NVarChar, 100) { Value = username });
+            cmd.Parameters.Add(new SqlParameter("@k", SqlDbType.NVarChar, 50) { Value = profileKey });
+            cmd.Parameters.Add(new SqlParameter("@n", SqlDbType.NVarChar, 200) { Value = displayName ?? "" });
+            cmd.Parameters.Add(new SqlParameter("@b", SqlDbType.NVarChar, -1) { Value = brief ?? "" });
+            cmd.Parameters.Add(new SqlParameter("@p", SqlDbType.NVarChar, 400) { Value = photoPath ?? "" });
             cmd.ExecuteNonQuery();
         }
 
+        // --------------------------------------------------------------------
         // Sections
+        // --------------------------------------------------------------------
+
+        /// <summary>
+        /// Reads a single section body for the specified (user, profile, section).
+        /// </summary>
         public string GetSection(string username, string profileKey, string section)
         {
             using var cmd = _conn.CreateCommand();
-            cmd.CommandText = @"SELECT Body FROM Sections WHERE Username=$u AND ProfileKey=$k AND Section=$s;";
-            cmd.Parameters.AddWithValue("$u", username);
-            cmd.Parameters.AddWithValue("$k", profileKey);
-            cmd.Parameters.AddWithValue("$s", section);
+            cmd.CommandText = @"
+                SELECT Body
+                FROM dbo.Sections
+                WHERE Username=@u AND ProfileKey=@k AND Section=@s;";
+            cmd.Parameters.Add(new SqlParameter("@u", SqlDbType.NVarChar, 100) { Value = username });
+            cmd.Parameters.Add(new SqlParameter("@k", SqlDbType.NVarChar, 50) { Value = profileKey });
+            cmd.Parameters.Add(new SqlParameter("@s", SqlDbType.NVarChar, 50) { Value = section });
+
             var result = cmd.ExecuteScalar();
-            return result == null ? "" : result.ToString() ?? "";
+            return result == null ? "" : (string)result;
         }
 
+        /// <summary>
+        /// Upserts a section body.
+        /// </summary>
         public void SaveSection(string username, string profileKey, string section, string body)
         {
             using var cmd = _conn.CreateCommand();
-            cmd.CommandText = @"INSERT INTO Sections(Username, ProfileKey, Section, Body, UpdatedAt)
-                                VALUES ($u, $k, $s, $b, $t)
-                                ON CONFLICT(Username, ProfileKey, Section) DO UPDATE SET Body=$b, UpdatedAt=$t;";
-            cmd.Parameters.AddWithValue("$u", username);
-            cmd.Parameters.AddWithValue("$k", profileKey);
-            cmd.Parameters.AddWithValue("$s", section);
-            cmd.Parameters.AddWithValue("$b", body);
-            cmd.Parameters.AddWithValue("$t", DateTime.UtcNow.ToString("o"));
+            cmd.CommandText = @"
+                IF EXISTS (SELECT 1 FROM dbo.Sections WHERE Username=@u AND ProfileKey=@k AND Section=@s)
+                    UPDATE dbo.Sections
+                    SET Body=@b, UpdatedAt=SYSUTCDATETIME()
+                    WHERE Username=@u AND ProfileKey=@k AND Section=@s;
+                ELSE
+                    INSERT INTO dbo.Sections(Username, ProfileKey, Section, Body, UpdatedAt)
+                    VALUES(@u, @k, @s, @b, SYSUTCDATETIME());";
+            cmd.Parameters.Add(new SqlParameter("@u", SqlDbType.NVarChar, 100) { Value = username });
+            cmd.Parameters.Add(new SqlParameter("@k", SqlDbType.NVarChar, 50) { Value = profileKey });
+            cmd.Parameters.Add(new SqlParameter("@s", SqlDbType.NVarChar, 50) { Value = section });
+            cmd.Parameters.Add(new SqlParameter("@b", SqlDbType.NVarChar, -1) { Value = body ?? "" });
             cmd.ExecuteNonQuery();
         }
 
+        // --------------------------------------------------------------------
+        // Disposal
+        // --------------------------------------------------------------------
         public void Dispose() => _conn?.Dispose();
     }
 }

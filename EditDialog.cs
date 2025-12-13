@@ -33,7 +33,7 @@ namespace ProfileApp
             };
 
             _save = new Button { Text = "Save" };
-            Theme.StylePrimaryButton(_save);
+            Theme.StyleSecondaryButton(_save);
             _save.Click += (_, __) => DialogResult = DialogResult.OK;
 
             _cancel = new Button { Text = "Cancel" };
